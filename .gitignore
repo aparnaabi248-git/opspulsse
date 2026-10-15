@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Environment variables — NEVER commit real secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Testing
+coverage/
+.nyc_output/
+.vitest/
+
+# Docker
+docker-compose.override.yml
+
+# Local data (MongoDB throwaway instances)
+mongo-data/
+.data/
+
+# Editor / OS noise
+*.pem.bak
+Thumbs.db
+desktop.ini

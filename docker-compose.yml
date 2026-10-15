@@ -1,0 +1,112 @@
+# ─── OpsPulse — full stack ─────────────────────────────────────────
+#   docker compose up --build
+#   → frontend  http://localhost:8080
+#   → backend   http://localhost:5000/api/health
+#
+# Copy .env.example to .env first and set JWT_SECRET.
+
+name: opspulse
+
+services:
+  # ── MongoDB ───────────────────────────────────────────────────────
+  mongo:
+    image: mongo:8
+    container_name: opspulse-mongo
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: ${MONGO_DB_NAME:-opspulse}
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      # Exposed for debugging with mongosh. Remove this line to keep
+      # MongoDB private to the compose network.
+      - "${MONGO_PORT:-27017}:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ ping: 1 }).ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [opspulse]
+
+  # ── Backend API ───────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: opspulse-backend
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      # Inside the compose network the host is the service name
+      MONGO_URI: mongodb://mongo:27017/${MONGO_DB_NAME:-opspulse}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set — copy .env.example to .env}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:8080}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # Monitoring scheduler
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      SCHEDULER_TICK_SECONDS: ${SCHEDULER_TICK_SECONDS:-30}
+      SCHEDULER_MAX_CONCURRENCY: ${SCHEDULER_MAX_CONCURRENCY:-10}
+
+      # Health check limits
+      MONITOR_MIN_INTERVAL_SECONDS: ${MONITOR_MIN_INTERVAL_SECONDS:-30}
+      MONITOR_DEFAULT_INTERVAL_SECONDS: ${MONITOR_DEFAULT_INTERVAL_SECONDS:-300}
+      MONITOR_DEFAULT_TIMEOUT_MS: ${MONITOR_DEFAULT_TIMEOUT_MS:-10000}
+
+      # ⚠️ Keep this false unless you really want to monitor internal hosts
+      ALLOW_PRIVATE_TARGETS: ${ALLOW_PRIVATE_TARGETS:-false}
+
+      CHECK_RETENTION_DAYS: ${CHECK_RETENTION_DAYS:-0}
+
+      # Rate limiting
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-900000}
+      RATE_LIMIT_AUTH_MAX: ${RATE_LIMIT_AUTH_MAX:-20}
+
+      # Optional email alerts (leave blank to disable)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_FROM: ${SMTP_FROM:-OpsPulse <noreply@opspulse.dev>}
+    ports:
+      - "${BACKEND_PORT:-5000}:5000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('http').get({host:'127.0.0.1',port:5000,path:'/api/health'},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks: [opspulse]
+
+  # ── Frontend (nginx) ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: opspulse-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    networks: [opspulse]
+
+volumes:
+  mongo-data:
+    driver: local
+
+networks:
+  opspulse:
+    driver: bridge

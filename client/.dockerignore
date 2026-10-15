@@ -1,0 +1,29 @@
+# Dependencies
+node_modules
+npm-debug.log*
+
+# Environment — never bake secrets into an image
+.env
+.env.*
+!.env.example
+
+# Build output
+dist
+build
+
+# Editor / OS
+.vscode
+.idea
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docker
+Dockerfile
+docker-compose*.yml
+.dockerignore
+# NOTE: nginx.conf is deliberately NOT ignored — the image copies it.
+
+# Docs & CI
+README.md
+.github

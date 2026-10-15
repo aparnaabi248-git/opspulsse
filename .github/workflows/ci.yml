@@ -1,0 +1,182 @@
+# GitHub Actions — lint, test and build
+#
+# Runs on every push and pull request.
+# The backend tests need MongoDB, so a real mongo service container is
+# started for the job (not a mock — the tests run genuine queries).
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  backend:
+    name: Backend (lint + test)
+    runs-on: ubuntu-latest
+
+    services:
+      mongo:
+        image: mongo:8
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+
+      - name: Install dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Lint
+        working-directory: server
+        run: npm run lint
+
+      - name: Run tests
+        working-directory: server
+        env:
+          # Point the test suite at the service container, not a developer's DB
+          TEST_MONGO_URI: mongodb://127.0.0.1:27017/opspulse_test
+        run: npm test -- --ci
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-coverage
+          path: server/coverage
+          retention-days: 7
+          if-no-files-found: ignore
+
+  frontend:
+    name: Frontend (lint + test + build)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: client
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test -- --run
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload the built bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: client/dist
+          retention-days: 7
+
+  docker:
+    name: Docker images build
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+
+    services:
+      mongo:
+        image: mongo:8
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Check out the code
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build only (no push). Add a registry login + tag/push step here
+      # when you publish images to Docker Hub or GHCR.
+      - name: Build backend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          push: false
+          load: true
+          tags: opspulse-backend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./client
+          push: false
+          load: true
+          tags: opspulse-frontend:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the backend container
+        run: |
+          docker run -d --name opspulse-smoke -p 5000:5000 \
+            -e NODE_ENV=production \
+            -e JWT_SECRET=ci-only-secret-0123456789abcdefghijklmnop \
+            -e MONGO_URI=mongodb://host.docker.internal:27017/opspulse_ci \
+            opspulse-backend:ci
+
+          # The container refuses to start without MongoDB, so /api/health is
+          # the honest signal that the whole boot path worked.
+          for i in $(seq 1 45); do
+            if curl -fsS http://127.0.0.1:5000/api/health > /dev/null; then
+              echo "backend container is healthy"
+              echo "--- health payload ---"
+              curl -fsS http://127.0.0.1:5000/api/health
+              echo ""
+              docker rm -f opspulse-smoke
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "backend container never became healthy"
+          docker logs opspulse-smoke
+          docker rm -f opspulse-smoke
+          exit 1
