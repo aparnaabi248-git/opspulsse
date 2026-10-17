@@ -79,14 +79,23 @@ api.interceptors.response.use(
       unauthorizedHandlers.forEach((fn) => fn());
     }
 
-    const payload = error.response?.data || {};
+    const raw = error.response?.data;
+    const payload = raw && typeof raw === 'object' ? raw : {};
+
+    // When the SPA catch-all rewrite swallows /api, Vercel answers with
+    // index.html instead of JSON. Detect that explicitly — otherwise the
+    // failure surfaces as a meaningless "Something went wrong".
+    const returnedHtml = typeof raw === 'string' && raw.trimStart().startsWith('<');
+
     const message =
       payload.message ||
-      (error.code === 'ECONNABORTED'
-        ? 'The server took too long to respond.'
-        : error.request && !error.response
-          ? 'Cannot reach the OpsPulse API. Is the backend running?'
-          : 'Something went wrong. Please try again.');
+      (returnedHtml
+        ? 'The API returned a web page instead of JSON. The frontend rewrite for /api is missing or points at the wrong backend.'
+        : error.code === 'ECONNABORTED'
+          ? 'The server took too long to respond.'
+          : error.request && !error.response
+            ? 'Cannot reach the OpsPulse API. Is the backend running?'
+            : 'Something went wrong. Please try again.');
 
     return Promise.reject(
       new ApiError(message, { status, errors: payload.errors || [] })

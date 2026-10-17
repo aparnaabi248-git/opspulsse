@@ -6,6 +6,7 @@ const cookieParser = require('cookie-parser');
 const mongoose = require('mongoose');
 
 const config = require('./config');
+const logger = require('./config/logger');
 const errorHandler = require('./middleware/errorHandler');
 const { apiLimiter } = require('./middleware/rateLimit');
 
@@ -31,15 +32,42 @@ app.use(
     contentSecurityPolicy: false,
   })
 );
+/**
+ * Normalise an origin so "https://App.example.com/" and "https://app.example.com"
+ * count as the same origin. A stray trailing slash is the most common reason a
+ * correctly configured origin is still rejected in production.
+ */
+const normalizeOrigin = (value) => String(value).trim().replace(/\/+$/, '').toLowerCase();
+
+const ALLOWED_ORIGINS = new Set(config.cors.origins.map(normalizeOrigin).filter(Boolean));
+
+const isOriginAllowed = (origin) =>
+  config.cors.origins.includes('*') || ALLOWED_ORIGINS.has(normalizeOrigin(origin));
+
+/**
+ * Refuse an unknown browser origin with a readable 403 *before* it reaches any
+ * route. This used to `throw`, which the global error handler turned into a
+ * 500 — so a simple CORS misconfiguration looked exactly like a crashed
+ * server. Requests without an Origin header (curl, health checks,
+ * server-to-server calls) still pass: CORS only constrains browsers.
+ */
+app.use((req, res, next) => {
+  const { origin } = req.headers;
+  if (!origin || isOriginAllowed(origin)) return next();
+
+  logger.warn(`CORS blocked ${req.method} ${req.originalUrl} from "${origin}"`);
+  return res.status(403).json({
+    success: false,
+    message: `Origin "${origin}" is not allowed by CORS. Add it to CORS_ORIGIN on the API.`,
+  });
+});
+
 app.use(
   cors({
     origin(origin, callback) {
-      // Allow same-origin/non-browser callers (curl, health checks, Docker)
-      if (!origin) return callback(null, true);
-      if (config.cors.origins.includes('*') || config.cors.origins.includes(origin)) {
-        return callback(null, true);
-      }
-      return callback(new Error(`Origin "${origin}" is not allowed by CORS`));
+      if (!origin || isOriginAllowed(origin)) return callback(null, true);
+      // Unreachable in practice — the guard above already answered 403.
+      return callback(null, false);
     },
     credentials: true,
   })
@@ -56,6 +84,25 @@ if (config.nodeEnv === 'development') {
 } else {
   app.use(morgan('combined'));
 }
+
+// ── Service index ────────────────────────────────────────────────────
+// The API host serves JSON only, there is no web UI on it. Answering the
+// root with a plain description makes it obvious which Vercel project is
+// the backend and which one is the frontend, instead of returning a bare
+// "route not found" that looks like a broken deployment.
+app.get('/', (req, res) => {
+  res.json({
+    success: true,
+    service: 'OpsPulse API',
+    repository: 'https://github.com/aparnaabi248-git/opspulsse',
+    endpoints: {
+      health: 'GET /api/health',
+      ready: 'GET /api/ready',
+      register: 'POST /api/auth/register',
+      login: 'POST /api/auth/login',
+    },
+  });
+});
 
 // ── Health / readiness ───────────────────────────────────────────────
 // Liveness: is the process itself alive? (no database needed)
