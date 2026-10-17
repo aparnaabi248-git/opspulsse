@@ -37,16 +37,31 @@ const logger = require('../src/config/logger');
 const CACHE_KEY = Symbol.for('opspulse.dbConnection');
 const MAX_POOL_SIZE = 5; // one pool per concurrent instance, not 20
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * A cold Vercel instance has no warm connection, and the first attempt
+ * regularly races the database cluster's own startup or a briefly dropped
+ * idle connection. One short retry converts most of those cold-start
+ * failures into an ordinary successful request.
+ */
+const connectWithRetry = async () => {
+  const options = { maxPoolSize: MAX_POOL_SIZE, bufferCommands: false };
+
+  try {
+    await connectDB(undefined, options);
+  } catch (error) {
+    logger.warn('MongoDB connect failed, retrying once', { message: error.message });
+    await sleep(1500);
+    await connectDB(undefined, options);
+  }
+};
+
 const ensureDatabase = () => {
   if (mongoose.connection.readyState === 1) return Promise.resolve();
 
   if (!globalThis[CACHE_KEY]) {
-    globalThis[CACHE_KEY] = connectDB(undefined, {
-      maxPoolSize: MAX_POOL_SIZE,
-      // Fail fast instead of queueing queries for 10s when the database is
-      // unreachable — a cold start should answer clearly, not hang.
-      bufferCommands: false,
-    }).catch((error) => {
+    globalThis[CACHE_KEY] = connectWithRetry().catch((error) => {
       // Do not cache a failure: the next request should retry.
       globalThis[CACHE_KEY] = null;
       throw error;
@@ -61,10 +76,20 @@ module.exports = async (req, res) => {
   try {
     await ensureDatabase();
   } catch (error) {
-    logger.error('Database unavailable for this request', { message: error.message });
+    // The cause is never echoed back, because `error.message` from the Mongo
+    // driver embeds the host name and part of the credentials. The exact
+    // message is in the function logs; the response only names the two things
+    // that are actually configurable.
+    logger.error('Database unavailable for this request', {
+      message: error.message,
+      method: req.method,
+      url: req.url,
+    });
     return res.status(503).json({
       success: false,
-      message: 'Database is not available. Please try again shortly.',
+      message:
+        'Database is not available. Check that MONGO_URI is set on the API and that this ' +
+        "deployment's outbound addresses are allowed by the database's network access rules.",
     });
   }
 
