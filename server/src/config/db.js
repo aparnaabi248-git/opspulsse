@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const config = require('./index');
 const logger = require('./logger');
+const { sanitizeError } = require('../utils/sanitizeError');
 
 /**
  * Connect to MongoDB.
@@ -34,7 +35,9 @@ const connectDB = async (uri = config.mongoUri, options = {}) => {
 
     return conn;
   } catch (error) {
-    logger.error('MongoDB connection failed', { message: error.message });
+    // Sanitized: the driver's raw message can embed the connection string,
+    // which would put the database credentials into the logs.
+    logger.error('MongoDB connection failed', sanitizeError(error, config.mongoUri));
     throw error;
   }
 };

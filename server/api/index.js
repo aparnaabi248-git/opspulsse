@@ -28,8 +28,10 @@
 const mongoose = require('mongoose');
 
 const app = require('../src/app');
+const config = require('../src/config');
 const { connectDB } = require('../src/config/db');
 const logger = require('../src/config/logger');
+const { sanitizeError } = require('../src/utils/sanitizeError');
 
 // Cache the in-flight promise on globalThis. Node reuses the module registry
 // between warm invocations, but globalThis also survives the cases where the
@@ -58,15 +60,18 @@ const connectWithRetry = async () => {
 };
 
 const ensureDatabase = () => {
+  // 1 === connected. Anything else means we must (re)establish a connection.
   if (mongoose.connection.readyState === 1) return Promise.resolve();
 
-  if (!globalThis[CACHE_KEY]) {
-    globalThis[CACHE_KEY] = connectWithRetry().catch((error) => {
-      // Do not cache a failure: the next request should retry.
-      globalThis[CACHE_KEY] = null;
-      throw error;
-    });
-  }
+  // A cached promise is only valid while the connection it produced is still
+  // alive. Atlas idle timeouts and Vercel instance recycling drop the socket
+  // without clearing `globalThis`, so a stale resolved promise would be handed
+  // back forever and the function would never reconnect.
+  globalThis[CACHE_KEY] = connectWithRetry().catch((error) => {
+    // Do not cache a failure: the next request should retry.
+    globalThis[CACHE_KEY] = null;
+    throw error;
+  });
 
   return globalThis[CACHE_KEY];
 };
@@ -76,20 +81,34 @@ module.exports = async (req, res) => {
   try {
     await ensureDatabase();
   } catch (error) {
-    // The cause is never echoed back, because `error.message` from the Mongo
-    // driver embeds the host name and part of the credentials. The exact
-    // message is in the function logs; the response only names the two things
-    // that are actually configurable.
+    // Sanitized: the raw Mongo error can embed the connection string, which
+    // would put credentials into the function logs.
+    const detail = sanitizeError(error, config.mongoUri);
+
     logger.error('Database unavailable for this request', {
-      message: error.message,
+      ...detail,
       method: req.method,
       url: req.url,
     });
+
+    // The env diagnostics below are booleans and a scheme only — never the
+    // connection string itself. Together they separate the two causes that
+    // look identical from the outside:
+    //   mongoUriSet === false  -> the variable never reached the function
+    //   mongoUriSet === true   -> the variable is fine; it is a network/cluster issue
     return res.status(503).json({
       success: false,
       message:
         'Database is not available. Check that MONGO_URI is set on the API and that this ' +
         "deployment's outbound addresses are allowed by the database's network access rules.",
+      diagnostic: {
+        mongoUriSet: Boolean(process.env.MONGO_URI),
+        resolvedScheme: String(config.mongoUri || '').split('://')[0] + '://',
+        driverError: { name: detail.name, code: detail.code },
+        // Sanitized, so it carries the reason without carrying credentials.
+        // The full detail (including the cause chain) is in the function log.
+        reason: (detail.cause?.message || detail.message || '').slice(0, 200),
+      },
     });
   }
 
