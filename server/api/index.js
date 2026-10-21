@@ -76,6 +76,31 @@ const ensureDatabase = () => {
   return globalThis[CACHE_KEY];
 };
 
+/**
+ * Turn the driver error into a concrete next step.
+ *
+ * Only the error class, code and sanitized reason are consulted, so nothing
+ * sensitive can end up in the response.
+ */
+const hintFor = (detail) => {
+  const text = `${detail.name} ${detail.message}`.toLowerCase();
+
+  if (detail.code === 8000 || text.includes('bad auth') || text.includes('authentication failed')) {
+    return (
+      'MongoDB rejected the credentials. Confirm the database user exists, and that the ' +
+      'password in MONGO_URI is correct and percent-encoded — a password containing @ / ? # ' +
+      'or : must be encoded (for example @ becomes %40).'
+    );
+  }
+  if (text.includes('econnrefused')) {
+    return 'The database refused the connection. Check the host and port, and that this deployment can reach the internet.';
+  }
+  if (text.includes('enotfound') || text.includes('server selection')) {
+    return 'The database host could not be reached in time. Check the cluster name in MONGO_URI and the database network access rules.';
+  }
+  return null;
+};
+
 // Vercel calls this for every HTTP request.
 module.exports = async (req, res) => {
   try {
@@ -108,6 +133,7 @@ module.exports = async (req, res) => {
         // Sanitized, so it carries the reason without carrying credentials.
         // The full detail (including the cause chain) is in the function log.
         reason: (detail.cause?.message || detail.message || '').slice(0, 200),
+        ...(hintFor(detail) ? { hint: hintFor(detail) } : {}),
       },
     });
   }

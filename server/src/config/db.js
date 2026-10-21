@@ -2,6 +2,7 @@ const mongoose = require('mongoose');
 const config = require('./index');
 const logger = require('./logger');
 const { sanitizeError } = require('../utils/sanitizeError');
+const { normalizeMongoUri } = require('../utils/normalizeMongoUri');
 
 /**
  * Connect to MongoDB.
@@ -21,7 +22,11 @@ const connectDB = async (uri = config.mongoUri, options = {}) => {
   mongoose.set('strictQuery', true);
 
   try {
-    const conn = await mongoose.connect(uri, {
+    // Normalise before connecting. A value pasted into a dashboard env var
+    // often arrives with surrounding quotes, stray whitespace, or a password
+    // that was not percent-encoded — all of which make Atlas reject the
+    // credentials with `bad auth` even though the string looks right.
+    const conn = await mongoose.connect(normalizeMongoUri(uri), {
       serverSelectionTimeoutMS: 10_000,
       maxPoolSize: options.maxPoolSize || 20,
       bufferCommands: options.bufferCommands !== false,
